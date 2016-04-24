@@ -1,0 +1,203 @@
+/*
+	WARNING!  This code has not been tested for 4 years, several Arduino updates, and at least two job changes by the author.
+	PLEASE use extreme caution when testing this code, both for components and operator safety
+
+	This code is meant to be shared non-commercially and with attribution.  If you'd like to make some money off of this, please
+	think of the poor college student behind it.
+    GearboxParkingUsingADC
+    4-3-2012
+    previous working code BasicAirsoftBarrelSensor
+
+    The circuit:
+    * LED on board at pin 13
+    * Motor control on pin 3 (PWM pin)
+    * pushbutton attached to pin 7 from +5V
+    * 10K resistor attached to pin 7 from ground
+    * ADC on analog pin 0
+    * The photo-interrupter on pin 2
+
+    Serial settings:
+    Bits per second 115200
+
+    */
+
+//#include <TimerOne.h>
+
+const int TriggerPin = 7; //Trigger switch attached to digital pin 7
+const int ledPin = 13; //onboard LED on pin 13
+const int MotorPin = 3; //Motor drive pin (on MOSFET) connected to PWM pin at pin 3
+const int CurrentSensor = 0; //Current flow sensor attached to Analog 0
+const int MotorSpeed = 255; //PWM value for motor, max 255
+volatile int BBdetect = 0; //BB seen or not
+const int SelectorPin = 8;  //Selector Pin
+const float CurveThresh = -4;  //negative slope detection threshold
+const int IRD = 110;  //In Rush Delay in milliseconds to deal with in-rush motor startup current
+const int Debounce = 50;  //Standard Debounce delay
+const float SpringSense = 4; //spring compression slope detection threshold
+
+int PowerCurve[7];  //initialize the power curve array size 8
+float CurvePoint;  //CurvePoint will be compared to CurveThresh to determine if the spring is in free-fall
+int fireTime = 0;
+int TriggerState = 0; // Trigger button state
+int FireMode = 0; //Firing mode of the gearbox.  0 is always safe, 1 is always singleshot
+volatile int IMain = 0; // Direct ADC reading from current sensor
+long ReadAmpsInterval = 1000; // This will provide 10 readings per AEG cycle
+int BurstSetting = 3;  //The number of rounds in a burst
+
+void setup()
+{
+  Serial.begin(115200);  //High output serial for testing
+  pinMode(MotorPin, OUTPUT);
+  analogWrite(MotorPin, 0);   //make sure the motorpin is off
+  pinMode(ledPin, OUTPUT);
+  pinMode(TriggerPin, INPUT);
+  digitalWrite(2, HIGH);  //Turn on the internal pull-up on digital 2
+  FireMode = 3;
+  
+  //Timer1.initialize(ReadAmpsInterval);  //set the interrupt timer to read at this interval
+  //attachInterrupt(0, ReadBB, FALLING);  //The BB ISR
+}
+
+void loop()
+{
+  TriggerState = digitalRead(TriggerPin);
+  if (TriggerState == HIGH)
+  {
+    if (FireMode == 0)
+    {
+      digitalWrite(ledPin, HIGH);
+      delay(100);
+      digitalWrite(ledPin, LOW);
+      delay(100);
+    }
+    else if (FireMode == 1)
+    {
+      SINGLESHOT();
+    }
+    else if (FireMode == 2)
+    {
+      BURST(BurstSetting);
+    }
+    else if (FireMode == 3)
+    {
+      FULLAUTO();
+    }
+  }
+  else
+  {
+    analogWrite(MotorPin, 0);
+  }
+}
+
+
+void SINGLESHOT()
+{
+  int PowerCurve[7];  //Initialize the PowerCurve Array
+  analogWrite(MotorPin, MotorSpeed);  //turn on Motor at MotorSpeed
+  digitalWrite(ledPin,HIGH);  //turn on indicator LED
+  delay(IRD);  //Allow the motor to run for IRD milliseconds before examining current
+  for (int i = 0; i < 7; i++)  //Get 7 of the 8 PowerCurve readings
+  {
+    IMain = analogRead(CurrentSensor);
+    PowerCurve[i] = IMain;
+  }
+  do                          //shuffle the array readings down one step and add a new reading at the top of the array stack
+  {
+    PowerCurve[0] = PowerCurve[1];
+    PowerCurve[1] = PowerCurve[2];
+    PowerCurve[2] = PowerCurve[3];
+    PowerCurve[3] = PowerCurve[4];
+    PowerCurve[4] = PowerCurve[5];
+    PowerCurve[5] = PowerCurve[6];
+    PowerCurve[6] = PowerCurve[7];
+    IMain = analogRead(CurrentSensor);
+    PowerCurve[7] = IMain;
+    CurvePoint = ((float)(PowerCurve[4]+PowerCurve[5]+PowerCurve[6]+PowerCurve[7])/4)-((float)(PowerCurve[0]+PowerCurve[1]+PowerCurve[2]+PowerCurve[3]+PowerCurve[4])/4);
+  }  while (CurvePoint > CurveThresh);   //keep running until the CurvePoint is below the Curve Threshold
+  analogWrite(MotorPin, 0);  // Turn off Motor after a single shot
+  digitalWrite(ledPin, HIGH);
+  do
+  {
+    delay(1);
+    TriggerState = digitalRead(TriggerPin);  //trigger latch
+  }  while (TriggerState == HIGH);   //the program will not continue until the trigger is released
+  delay(Debounce);  //this debounce is critical.  The SINGLESHOT function exits here.  If the trigger is still bouncing, it will trigger another shot
+}
+
+void BURST(int BurstCount)
+{
+  int PowerCurve[7];  //Initialize the PowerCurve Array
+  analogWrite(MotorPin, MotorSpeed);  //turn on Motor at MotorSpeed
+  digitalWrite(ledPin,HIGH);  //turn on indicator LED
+  delay(IRD);  //Allow the motor to run for IRD milliseconds before examining current
+  for (int i = 0; i < 7; i++)  //Get 7 of the 8 PowerCurve readings
+  {
+    IMain = analogRead(CurrentSensor);
+    PowerCurve[i] = IMain;
+  }
+  for (int j = 0; j < BurstCount; j++)  //run the loop enough times to fire the burst
+  {
+    do                          //shuffle the array readings down one step and add a new reading at the top of the array stack
+    {
+      PowerCurve[0] = PowerCurve[1];
+      PowerCurve[1] = PowerCurve[2];
+      PowerCurve[2] = PowerCurve[3];
+      PowerCurve[3] = PowerCurve[4];
+      PowerCurve[4] = PowerCurve[5];
+      PowerCurve[5] = PowerCurve[6];
+      PowerCurve[6] = PowerCurve[7];
+      IMain = analogRead(CurrentSensor);
+      PowerCurve[7] = IMain;
+      CurvePoint = ((float)(PowerCurve[4]+PowerCurve[5]+PowerCurve[6]+PowerCurve[7])/4)-((float)(PowerCurve[0]+PowerCurve[1]+PowerCurve[2]+PowerCurve[3]+PowerCurve[4])/4);
+    }  while (CurvePoint > CurveThresh);   //keep running until the CurvePoint is below the Curve Threshold
+    delay(60);
+  }
+  analogWrite(MotorPin, 0);  // Turn off Motor after a single shot
+  digitalWrite(ledPin, HIGH);
+  do
+  {
+    delay(1);
+    TriggerState = digitalRead(TriggerPin);  //trigger latch
+  }  while (TriggerState == HIGH);   //the program will not continue until the trigger is released
+  delay(Debounce);  //this debounce is critical.  The SINGLESHOT function exits here.  If the trigger is still bouncing, it will trigger another shot
+}
+
+void FULLAUTO()
+{
+  int PowerCurve[7];  //Initialize the PowerCurve Array
+  analogWrite(MotorPin, MotorSpeed);  //turn on Motor at MotorSpeed
+  digitalWrite(ledPin,HIGH);  //turn on indicator LED
+  delay(IRD);  //Allow the motor to run for IRD milliseconds before examining current
+  for (int i = 0; i < 7; i++)  //Get 7 of the 8 PowerCurve readings
+  {
+    IMain = analogRead(CurrentSensor);
+    PowerCurve[i] = IMain;
+  }
+  do
+  {
+    do                          //shuffle the array readings down one step and add a new reading at the top of the array stack
+    {
+      PowerCurve[0] = PowerCurve[1];
+      PowerCurve[1] = PowerCurve[2];
+      PowerCurve[2] = PowerCurve[3];
+      PowerCurve[3] = PowerCurve[4];
+      PowerCurve[4] = PowerCurve[5];
+      PowerCurve[5] = PowerCurve[6];
+      PowerCurve[6] = PowerCurve[7];
+      IMain = analogRead(CurrentSensor);
+      PowerCurve[7] = IMain;
+      CurvePoint = ((float)(PowerCurve[4]+PowerCurve[5]+PowerCurve[6]+PowerCurve[7])/4)-((float)(PowerCurve[0]+PowerCurve[1]+PowerCurve[2]+PowerCurve[3]+PowerCurve[4])/4);
+    }  while (CurvePoint > CurveThresh);   //keep running until the CurvePoint is below the Curve Threshold
+    delay(60);
+    TriggerState = digitalRead(TriggerPin);
+  } while (TriggerState == HIGH);
+  analogWrite(MotorPin, 0);  // Turn off Motor after a single shot
+  digitalWrite(ledPin, HIGH);
+  do
+  {
+    delay(1);
+    TriggerState = digitalRead(TriggerPin);  //trigger latch
+  }  while (TriggerState == HIGH);   //the program will not continue until the trigger is released
+  delay(Debounce);  //this debounce is critical.  The SINGLESHOT function exits here.  If the trigger is still bouncing, it will trigger another shot
+}
+ 
